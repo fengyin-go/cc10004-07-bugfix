@@ -1,4 +1,8 @@
-"""交互查询接口：维护查询语句，覆盖提交执行、启动查询、终止查询、保存结果等动作。"""
+"""交互查询接口：维护查询语句，覆盖提交执行、启动查询、终止查询、保存结果等动作。
+
+动作协议兼容两种形态：values.action / values.round（新前端）与顶层 action /
+round（旧前端）。未被状态机接受的动作同样写入执行轨迹，并随 entry 返回给前端。
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -26,13 +30,15 @@ def list_entries(
     """按语句编号与状态过滤交互查询列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
+    if status is not None and status not in STATUSES:
+        raise HTTPException(status_code=400, detail=f"状态「{status}」不在允许的状态序列里（{'、'.join(STATUSES)}）")
     items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
 
 
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
-    """读取单条查询语句明细；不存在时给出可读的错误说明。"""
+    """读取单条查询语句明细（含执行轨迹）；不存在时给出可读的错误说明。"""
     entry = service.get_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"查询语句 {entry_id} 不存在或已归档")
@@ -50,12 +56,19 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条查询语句执行提交执行、启动查询、终止查询、保存结果；不允许的动作会被拦下并说明原因。"""
-    action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    """对单条查询语句执行提交执行、启动查询、终止查询、保存结果。
+
+    状态机未接受的动作以 ok=False 返回并说明理由，拒绝理由同时写入执行轨迹；
+    完成与终止争用同一轮次时，以轨迹中首个被接受的终裁动作为胜出依据。
+    """
+    entry, message, accepted = service.run_action(
+        entry_id,
+        payload.resolve_action(),
+        payload.resolve_round(),
+    )
     if entry is None:
         return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
+    return ActionResult(ok=accepted, message=message, entry=entry)
 
 
 @router.get("/export")

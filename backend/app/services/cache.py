@@ -1,6 +1,12 @@
-"""查询缓存业务规则：状态流转、字段校验与筛选口径都收在这里。"""
+"""查询缓存业务规则：状态流转、字段校验与筛选口径都收在这里。
+
+跨模块准入：交互查询已完成轮次的结果身份通过 admit_query_result 进入查询缓存，
+只接纳已完成轮次；超时轮次与过期动作根本不会走到这里。重复准入只认可首次
+那份结果身份，不覆盖、不新增。
+"""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from app.store import store
@@ -10,6 +16,10 @@ REQUIRED_FIELDS = ["策略编号", "目标查询", "缓存键规则"]
 STATUS_ORDER = ["草稿", "待校验", "已启用", "已停用"]
 ACTION_RULES = {"提交校验": "待校验", "启用缓存": "已启用", "停用缓存": "已停用"}
 NEGATIVE_ACTIONS = ["停用缓存"]
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class CacheService:
@@ -59,3 +69,46 @@ class CacheService:
         entry["pending"] = target != STATUS_ORDER[-1]
         entry["abnormal"] = action in NEGATIVE_ACTIONS
         return entry, f"缓存策略已{action}"
+
+    def admit_query_result(
+        self,
+        *,
+        query_id: int,
+        query_code: str,
+        round_no: int,
+        result_id: str,
+        trajectory_seq: int,
+        timeout: Any = None,
+    ) -> dict[str, Any]:
+        """把交互查询已完成轮次的结果身份准入查询缓存。
+
+        准入证据（来源语句、来源轮次、结果身份、准入轨迹序号）随条目保存，
+        从缓存条目可以反查交互查询的执行轨迹。重复准入只认可首次那份结果
+        身份：已存在同一语句的准入条目时直接返回原条目，不覆盖、不新增。
+        """
+        rows = store.rows(MODULE)
+        for row in rows:
+            if row.get("来源模块") == "交互查询" and row.get("来源语句") == query_code:
+                return row
+        entry: dict[str, Any] = {
+            "id": max((int(row.get("id", 0)) for row in rows), default=0) + 1,
+            "策略编号": f"QC-{query_code}",
+            "目标查询": query_code,
+            "缓存键规则": f"query:{query_id}:r{round_no}",
+            "过期秒数": str(timeout or "300"),
+            "刷新触发": "结果保存",
+            "命中率阈值": "0",
+            "最大条目数": "1",
+            "淘汰算法": "LRU",
+            "status": "已启用",
+            "pending": False,
+            "abnormal": False,
+            "来源模块": "交互查询",
+            "来源语句": query_code,
+            "来源轮次": round_no,
+            "结果身份": result_id,
+            "准入轨迹": trajectory_seq,
+            "准入时间": _now(),
+        }
+        rows.append(entry)
+        return entry

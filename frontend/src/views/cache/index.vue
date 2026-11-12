@@ -63,23 +63,29 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import { request } from '@/api/client'
 
 type Row = Record<string, string | number | null>
 
 const ENDPOINT = '/api/cache'
-const columns = ["策略编号", "目标查询", "缓存键规则", "过期秒数", "刷新触发", "命中率阈值", "最大条目数", "淘汰算法"]
+// 末尾四列为交互查询结果准入的溯源证据：来源语句、来源轮次、结果身份、准入轨迹
+const columns = ["策略编号", "目标查询", "缓存键规则", "过期秒数", "刷新触发", "命中率阈值", "最大条目数", "淘汰算法", "来源语句", "来源轮次", "结果身份", "准入轨迹"]
 const actions = ["提交校验", "启用缓存", "停用缓存"]
 const statuses = ["草稿", "待校验", "已启用", "已停用"]
-const stats = [{"label": "缓存策略总数", "value": 0}, {"label": "已启用策略", "value": 0}, {"label": "待校验策略", "value": 0}]
 
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+const stats = computed(() => [
+  { label: '缓存策略总数', value: total.value },
+  { label: '已启用策略', value: rows.value.filter((row) => row.status === '已启用').length },
+  { label: '待校验策略', value: rows.value.filter((row) => row.status === '待校验').length },
+])
 
 function resetFilters() {
   filters.value = {}
@@ -96,25 +102,35 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  let message = ''
+  let failed = false
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
-      body: JSON.stringify({ action }),
+      // 协议：动作放在 values 里提交，后端同时兼容顶层 action 的旧形态
+      body: JSON.stringify({ values: { action } }),
     })
-    if (!response.ok) {
-      throw new Error('查询缓存动作未生效，请稍后重试')
+    const payload = await response.json()
+    if (!response.ok || !payload.ok) {
+      failed = true
+      message = String(payload.message ?? payload.detail ?? '查询缓存动作未生效')
     }
-    await reload()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '查询缓存操作失败'
+    failed = true
+    message = error instanceof Error ? error.message : '查询缓存操作失败'
+  }
+  await reload()
+  if (failed) {
+    errorMessage.value = message
   }
 }
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const params = new URLSearchParams(filters.value as Record<string, string>)
+  params.set('size', '200')
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}?${params.toString()}`)
     if (!response.ok) {
       throw new Error('缓存策略列表读取失败')
     }

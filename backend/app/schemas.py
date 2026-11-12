@@ -22,10 +22,36 @@ class ActionResult(BaseModel):
 
 
 class EntryPayload(BaseModel):
-    """登记或修改一条业务记录时提交的字段集合。"""
+    """登记或修改一条业务记录时提交的字段集合。
+
+    协议兼容两种前端形态：新前端把动作与轮次放在 values 里（values.action、
+    values.round），旧前端直接提交顶层 action / round 字段；两种形态都会被
+    正确解释，避免网页提交顶层 action 而后端只读 values.action 导致 ok=false。
+    """
 
     values: dict[str, Any] = Field(default_factory=dict)
     remark: str | None = None
+    action: str | None = None
+    round: int | None = None
+
+    def resolve_action(self) -> str:
+        """读取动作名：优先 values.action，回退顶层 action（旧前端协议）。"""
+        raw = self.values.get("action")
+        if raw is None or str(raw).strip() == "":
+            raw = self.action
+        return str(raw or "").strip()
+
+    def resolve_round(self) -> int | None:
+        """读取动作针对的执行轮次：优先 values.round，回退顶层 round；缺省表示不校验轮次。"""
+        raw = self.values.get("round")
+        if raw is None or str(raw).strip() == "":
+            raw = self.round
+        if raw is None or str(raw).strip() == "":
+            return None
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return None
 
 
 
